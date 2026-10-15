@@ -47,11 +47,11 @@ st.markdown(
 def load_resources():
     get_model()  # Modell vorab laden, damit die erste Frage schnell kommt
     snapshot = load_snapshot()
-    provider_label, _ = llm.get_chat_model()
-    return snapshot, provider_label
+    provider_label, model = llm.get_chat_model()
+    return snapshot, provider_label, model is not None, llm.provider_notes()
 
 
-snapshot, provider_label = load_resources()
+snapshot, provider_label, llm_active, provider_notes = load_resources()
 if snapshot.is_empty:
     st.error("Der Vektorindex ist leer. Bitte zuerst `python -m embeddings.build_index` ausführen.")
     st.stop()
@@ -191,7 +191,13 @@ with right:
 
 with st.sidebar:
     st.header("Technik")
-    st.markdown(f"**LLM:** {provider_label}")
+    st.markdown(f"**LLM:** {'🟢' if llm_active else '🟠'} {provider_label}")
+    with st.expander("Provider-Details"):
+        for note in provider_notes:
+            st.caption(f"• {note}")
+        if not llm_active:
+            st.caption("Fragen werden aus dem trennschärfsten Modulabschnitt gebaut. API-Key in `.env` eintragen "
+                       "oder Ollama starten, um LLM-Fragen zu nutzen (Check: `python -m core.llm`).")
     st.markdown(f"**Embeddings:** `{settings.embedding_model.split('/')[-1]}`")
     st.markdown(f"**Index:** {len(snapshot.program_ids)} Studiengänge, {len(snapshot.chunk_ids)} Chunks (ChromaDB)")
-    st.caption("Datengrundlage: Beispiel-Modulhandbücher (keine offiziellen HSD-Dokumente).")
+    st.caption("Datengrundlage: offizielle Modulhandbücher des Fachbereichs Medien der HSD.")

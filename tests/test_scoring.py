@@ -14,7 +14,7 @@ from core.question_generator import (
 )
 from core.scoring import UserProfile, cosine_scores, score_programs
 from core.similarity import cosine, cosine_to_percent, normalize
-from embeddings.loader import OVERVIEW_MODULE, detect_module, is_toc_page
+from embeddings.loader import OVERVIEW_MODULE, _is_informative, detect_module, is_toc_page
 from embeddings.vector_store import IndexSnapshot
 
 FLOOR, CEIL = 0.10, 0.60
@@ -239,3 +239,15 @@ def test_toc_pages_are_recognised():
 
 def test_question_dataclass_defaults():
     assert Question("a?", "", "", "p", "s").chunk_id is None
+
+
+def test_loader_drops_layout_boilerplate_and_literature_but_keeps_content():
+    header = ("Verwendung in anderen Studiengängen: Modulbeauftragte/r: Prof. Dr. Dozent/in: Lehrende "
+              "Hochschule / Studiengang: HSD Credits Workload Kontaktzeit Selbststudium Dauer 1 Sem")
+    literature = "M. Beispiel: Webentwicklung für Einsteiger, 4. Auflage, Springer Verlag 2019, ISBN 123"
+    content = ("Die Studierenden können interaktive Webanwendungen entwerfen, mit Nutzern testen und "
+               "anhand der Ergebnisse verbessern. Sie kennen Grundlagen der Usability.")
+    assert not _is_informative(header)
+    assert not _is_informative(literature)
+    assert _is_informative(content)
+    assert not _is_informative("1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30")

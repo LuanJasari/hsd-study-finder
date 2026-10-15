@@ -33,6 +33,20 @@ _MODULE_HEADINGS = [
 ]
 # Endet ein Titel auf eines dieser Wörter, ist er in der nächsten Zeile umgebrochen
 _DANGLING = {"der", "des", "die", "das", "und", "für", "von", "in", "im", "zu", "zur", "to", "of", "and", "for", "&", "-"}
+# Begriffe aus Tabellenköpfen, Prüfungsangaben und Literaturlisten der Modulhandbücher. Abschnitte, die
+# mehrere davon enthalten, beschreiben das Layout statt der Inhalte und würden Studiengänge nur nach
+# der Gestaltung ihrer PDF unterscheiden.
+_BOILERPLATE_TERMS = re.compile(
+    r"verwendung in anderen|modulbeauftragte|dozent/in|kontaktzeit|selbststudium|workload|\bsws\b|tutorium|"
+    r"studienar|wahlkatalog|modulkategorie|anschlüsse zu|voraussetzungen (?:zur|für)|prüfungsform|"
+    r"stellenwert der note|creditvergabe|lehrformen|häufigkeit des angebots|credit points|studiensemester|"
+    r"kennnummer|kennummer|gruppengröße|hochschule / studiengang|"
+    r"\bcredits\b|\bcp\b|dauer\b.*\bsem|gesamtberechnung|∑|\bw/s\b|\d+ h\b.*\d+ h\b",
+    re.I,
+)
+MAX_BOILERPLATE_TERMS = 2
+# Literaturangaben sagen nichts über Interessen aus und fallen komplett heraus
+_LITERATURE = re.compile(r"\bliteratur\b|\bauflage\b|\bverlag\b|\bisbn\b|springer|wiley|hanser|pearson|vieweg|o.reilly", re.I)
 _DOT_LEADER = re.compile(r"\.{4,}")
 _HEADER_LINES, _FOOTER_LINES = 6, 3
 _HEADING_SCAN_LINES = 10
@@ -108,7 +122,11 @@ def _flatten(lines: list[str]) -> str:
 def _is_informative(text: str) -> bool:
     if len(text) < MIN_CHUNK_CHARS:
         return False
-    return sum(c.isalpha() for c in text) / len(text) >= MIN_ALPHA_RATIO
+    if sum(c.isalpha() for c in text) / len(text) < MIN_ALPHA_RATIO:
+        return False
+    if _LITERATURE.search(text):
+        return False
+    return len({m.group(0).lower() for m in _BOILERPLATE_TERMS.finditer(text)}) <= MAX_BOILERPLATE_TERMS
 
 
 def _splitter() -> RecursiveCharacterTextSplitter:
@@ -172,13 +190,13 @@ def load_markdown(path: Path) -> list[Chunk]:
 
 
 def load_all_chunks(data_dir: Path | None = None) -> list[Chunk]:
-    """Liest alle ``*.pdf`` in ``data/`` sowie ``*.md`` in ``data/`` und ``data/programs/``."""
+    """Liest alle ``*.pdf`` in ``data/`` (optional auch ``*.md`` mit Front-Matter)."""
     data_dir = data_dir or settings.data_dir
     chunks: list[Chunk] = []
     for path in sorted(data_dir.glob("*.pdf")):
         program_id = program_id_from_path(path)
         chunks += load_pdf(path, program_id, PROGRAM_NAMES.get(program_id, path.stem))
-    for path in sorted([*data_dir.glob("*.md"), *data_dir.glob("programs/*.md")]):
+    for path in sorted(data_dir.glob("*.md")):
         if path.name.lower() != "readme.md":
             chunks += load_markdown(path)
     return chunks

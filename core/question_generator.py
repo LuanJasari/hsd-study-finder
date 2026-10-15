@@ -24,7 +24,7 @@ from core.scoring import ProgramScore
 from embeddings.loader import OVERVIEW_MODULE
 from embeddings.vector_store import IndexSnapshot
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("hsd.questions")
 
 SEPARATING_CHUNKS = 4
 CONTEXT_CHARS = 420
@@ -34,11 +34,36 @@ SYSTEM_PROMPT = (
     "der Hochschule Düsseldorf. Du stellst einer Studieninteressierten oder einem Studieninteressierten "
     "EINE kurze, gut verständliche Entscheidungsfrage, die zwischen den aktuellen Kandidaten trennt. "
     "Stütze dich ausschließlich auf die gelieferten Modulabschnitte. Keine Fachbegriffe ohne Erklärung, "
-    "kein Siezen, keine Suggestivfragen, und wiederhole keine bereits gestellte Frage. "
+    "kein Siezen, keine Suggestivfragen, und wiederhole keine bereits gestellte Frage.\n"
+    "Das Feld \"feature\" wird später eingebettet und verschiebt das Profil der Person. Es muss deshalb "
+    "konkret sein: ein Satz mit 8 bis 20 Wörtern, der eine Tätigkeit oder einen Anwendungsfall nennt und "
+    "ein bis zwei Fachbegriffe aus den Abschnitten enthält. Keine Floskeln (\"Die Studierenden kennen …\"), "
+    "keine Studiengangsnamen, keine allgemeinen Sätze wie \"Interesse an Technik\".\n"
+    "Gute Merkmale: \"Interaktive Webanwendungen mit Frontend-Frameworks entwickeln und in Nutzertests prüfen\" · "
+    "\"Statistische Modelle und maschinelles Lernen auf Daten anwenden, um Vorhersagen zu treffen\" · "
+    "\"Audiosignale aufnehmen, mischen und im Studio produzieren\".\n"
     'Antworte NUR mit JSON: {"question": "Frage mit höchstens 20 Wörtern, auf die man mit Ja/Nein antworten kann", '
     '"detail": "ein erklärender Satz mit Beispiel", '
-    '"feature": "ein Satz im Stil einer Modulbeschreibung, der das erfragte Interesse positiv beschreibt", '
+    '"feature": "das konkrete Merkmal wie oben beschrieben, positiv formuliert", '
     '"rationale": "ein Satz: warum diese Frage zwischen den Kandidaten trennt"}'
+)
+
+# Anwendungsentwicklung (Web, Mobile, UX) ist der Bereich, in dem sich Medieninformatik und Data-Science-/KI-Studiengänge
+# überschneiden. Eine Frage wie „Programmierst du gern?“ trennt dort nicht, ein konkreter Anwendungsfall schon.
+APP_DEV_PATTERN = re.compile(
+    r"\bweb\w*|\bapps?\b|mobile?\b|smartphone|front-?end|\bui\b|\bux\b|usab\w+|benutzer(?:oberfläche|freundlich)\w*|"
+    r"interaktiv\w*|software-?(?:entwicklung|engineering)|anwendungsentwicklung|programmier\w+",
+    re.I,
+)
+APP_DEV_HINT = (
+    "\nHinweis Anwendungsentwicklung: Mehrere Kandidaten behandeln Programmierung, Web, Apps oder UX. "
+    "\"Programmierst du gern?\" oder \"Magst du Apps?\" trennt hier nicht. Frage stattdessen nach EINEM konkreten "
+    "Merkmal und wähle die Dimension, die sich in den Abschnitten am deutlichsten zwischen den Kandidaten unterscheidet:\n"
+    "- Medien & Interaktion: Web-Frontends und Responsive Design, Mobile Apps, Usability-/UX-Tests, Grafik, Animation, 3D/VR, Medienproduktion\n"
+    "- Daten & Intelligenz: Datenanalyse, Statistik, maschinelles Lernen, Empfehlungs- und Assistenzsysteme, Informationssicherheit, KI-Infrastruktur\n"
+    "- Software-Handwerk: Objektorientierung, Architektur, Datenbanken, Teamprojekte\n"
+    "Das \"feature\" benennt die gewählte Dimension mit einem konkreten Anwendungsfall (z. B. \"eine Web-App entwerfen "
+    "und in Nutzertests verbessern\" statt \"Software entwickeln\")."
 )
 
 
@@ -71,7 +96,10 @@ def separating_chunks(
 ) -> list[int]:
     """Indizes der trennschärfsten Chunks der Kandidaten, je Modul höchstens einer."""
     pool = np.concatenate([snapshot.chunks_of(p) for p in candidates])
-    spread = snapshot.chunk_vs_centroid[pool][:, candidates].std(axis=1)
+    to_candidates = snapshot.chunk_vs_centroid[pool][:, candidates]
+    # Streuung × Typizität: Ausreißer (Literaturlisten, Kopfzeilen) streuen zwar stark, sind aber für
+    # keinen Kandidaten charakteristisch
+    spread = to_candidates.std(axis=1) * np.clip(to_candidates.max(axis=1), 0.0, 1.0)
     if asked_probes:
         overlap = (snapshot.chunk_embeddings[pool] @ np.stack(asked_probes).T).max(axis=1)
         spread = spread * (1.0 - np.clip(overlap, 0.0, 1.0))
@@ -95,6 +123,11 @@ def _context(snapshot: IndexSnapshot, idx: int) -> str:
     return f"[{meta['program_name']} · {_module_title(meta['module'])}] {_excerpt(snapshot.chunk_texts[idx], CONTEXT_CHARS)}"
 
 
+def needs_app_dev_hint(texts: list[str], n_candidates: int) -> bool:
+    """Der Hinweis greift nur, wenn mehrere Kandidaten im Rennen sind und die Abschnitte/Fragen Anwendungsentwicklung berühren."""
+    return n_candidates >= 2 and any(APP_DEV_PATTERN.search(text) for text in texts)
+
+
 def _prompt(
     snapshot: IndexSnapshot,
     u: np.ndarray,
@@ -103,16 +136,19 @@ def _prompt(
     picks: list[int],
     asked: list[Question],
 ) -> str:
+    separating = [_context(snapshot, idx) for idx in picks]
+    closest = [_context(snapshot, best[0]) for p in candidates if (best := snapshot.retrieve(u, k=1, program_idx=p))]
     lines = ["Aktuelle Scores (unabhängig, Summe ≠ 100 %):"]
     lines += [f"- {s.name}: {s.percent:.0f} %" for s in scores]
     lines.append("\nTrennscharfe Modulabschnitte der Kandidaten:")
-    lines += [f"{i}. {_context(snapshot, idx)}" for i, idx in enumerate(picks, 1)]
+    lines += [f"{i}. {text}" for i, text in enumerate(separating, 1)]
     lines.append("\nWas dem bisherigen Profil je Kandidat am nächsten liegt:")
-    for p in candidates:
-        best = snapshot.retrieve(u, k=1, program_idx=p)
-        lines += [f"- {_context(snapshot, best[0])}"] if best else []
+    lines += [f"- {text}" for text in closest]
     lines.append("\nBereits gestellte Fragen (nicht wiederholen):")
     lines += [f"- {q.text}" for q in asked] or ["- (noch keine)"]
+    if needs_app_dev_hint(separating + closest + [q.text for q in asked], len(candidates)):
+        log.debug("Hinweis Anwendungsentwicklung im Prompt")
+        lines.append(APP_DEV_HINT)
     lines.append("\nFormuliere jetzt die nächste Frage als JSON.")
     return "\n".join(lines)
 
@@ -164,7 +200,7 @@ def generate_question(
     if chat is not None:
         try:
             data = _parse_json(chat.complete(SYSTEM_PROMPT, _prompt(snapshot, u, scores, candidates, picks, asked), json_mode=True))
-            return Question(
+            question = Question(
                 text=_escape(data["question"]),
                 detail=_escape(str(data.get("detail", ""))),
                 rationale=str(data.get("rationale", "")).strip(),
@@ -172,9 +208,16 @@ def generate_question(
                 source=chat.label,
                 chunk_id=snapshot.chunk_ids[picks[0]],
             )
+            log.info("Frage %d von %s: %s | Merkmal: %s", len(asked) + 1, chat.label, question.text, question.probe_text)
+            return question
         except Exception as exc:  # Netzwerk, Rate-Limit, kaputtes JSON … die Demo läuft regelbasiert weiter
-            log.warning("LLM-Frage fehlgeschlagen, nutze Fallback: %s", exc)
-    return _rule_based(snapshot, scores, candidates, picks)
+            log.warning("LLM-Frage fehlgeschlagen (%s: %s) – nutze regelbasierte Frage.", type(exc).__name__, exc)
+            question = _rule_based(snapshot, scores, candidates, picks)
+            question.source = f"{FALLBACK_LABEL} · {chat.label} nicht erreichbar oder unbrauchbar ({type(exc).__name__})"
+            return question
+    question = _rule_based(snapshot, scores, candidates, picks)
+    log.info("Frage %d regelbasiert: %s", len(asked) + 1, question.text)
+    return question
 
 
 EXPLAIN_SYSTEM = (
@@ -205,7 +248,7 @@ def build_explanation(
             ])
             return chat.complete(EXPLAIN_SYSTEM, user).strip()
         except Exception as exc:
-            log.warning("LLM-Begründung fehlgeschlagen, nutze Fallback: %s", exc)
+            log.warning("LLM-Begründung fehlgeschlagen (%s: %s) – nutze regelbasierte Begründung.", type(exc).__name__, exc)
     bullets = "\n".join(
         f"- *{_module_title(snapshot.chunk_meta[i]['module'])}*: {_excerpt(snapshot.chunk_texts[i], 200)}" for i in best
     )

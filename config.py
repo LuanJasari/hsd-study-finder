@@ -5,6 +5,7 @@ Alle Werte lassen sich per Umgebungsvariable bzw. ``.env`` überschreiben (siehe
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,8 +49,8 @@ class Settings:
     chunk_overlap: int = field(default_factory=lambda: int(_get("CHUNK_OVERLAP", "80")))
 
     # Scoring: cos → Prozent (linear, ohne Softmax)
-    cos_floor: float = field(default_factory=lambda: float(_get("COS_FLOOR", "0.44")))
-    cos_ceil: float = field(default_factory=lambda: float(_get("COS_CEIL", "0.874")))
+    cos_floor: float = field(default_factory=lambda: float(_get("COS_FLOOR", "0.436")))
+    cos_ceil: float = field(default_factory=lambda: float(_get("COS_CEIL", "0.758")))
     score_alpha: float = field(default_factory=lambda: float(_get("SCORE_ALPHA", "0.5")))
     score_top_k_chunks: int = field(default_factory=lambda: int(_get("SCORE_TOP_K_CHUNKS", "5")))
     prior_weight: float = field(default_factory=lambda: float(_get("PRIOR_WEIGHT", "1.0")))
@@ -73,5 +74,23 @@ class Settings:
     ollama_model: str = field(default_factory=lambda: _get("OLLAMA_MODEL", "llama3.1:8b"))
     llm_timeout: float = 30.0
 
+    # Logging (Logger-Familie "hsd.*": LLM-Auswahl, LLM-Aufrufe, Fallbacks)
+    log_level: str = field(default_factory=lambda: _get("LOG_LEVEL", "INFO").upper())
+
 
 settings = Settings()
+
+
+def _configure_logging() -> None:
+    """Eigener Handler für ``hsd.*``, damit die Meldungen im Terminal auch unter Streamlit erscheinen."""
+    logger = logging.getLogger("hsd")
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s", "%H:%M:%S"))
+    logger.addHandler(handler)
+    logger.setLevel(getattr(logging, settings.log_level, logging.INFO))
+    logger.propagate = False
+
+
+_configure_logging()

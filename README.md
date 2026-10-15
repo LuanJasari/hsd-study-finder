@@ -5,8 +5,10 @@
 Portfolioprojekt im Modul *Advances in Intelligent Systems* · Michael Adzase & Luan Jasari ·
 Live-Demo auf der KI-Con (11.01.2027).
 
-> ⚠️ Die Modulhandbücher in `data/programs/` sind **Beispieldaten** und keine offiziellen
-> HSD-Dokumente. Wie die echten Handbücher eingebunden werden, steht in [`data/README.md`](data/README.md).
+> 📄 **Datenbasis:** Die offiziellen Modulhandbücher des Fachbereichs Medien der HSD liegen als PDF in
+> [`data/`](data/): `BMI.pdf` (Medieninformatik), `BMT(Medientechnik).pdf`, `BTB(Bild_und_Ton).pdf` und
+> `DAISY.pdf`. Der Dateiname bis zur ersten Klammer ist das Studiengangskürzel; neue Handbücher einfach
+> als PDF dazulegen (Anzeigename ggf. in `PROGRAM_NAMES` in `config.py` ergänzen) und den Index neu bauen.
 
 ---
 
@@ -29,7 +31,7 @@ grenzt so die passenden Studiengänge ein. Dabei gilt:
 
 ```
                     ┌──────────────────────── Offline ────────────────────────┐
- data/*.md|*.pdf ──▶│ loader.py ─▶ Chunking ─▶ embedder.py ─▶ ChromaDB          │
+ data/*.pdf ───▶│ loader.py ─▶ Chunking ─▶ embedder.py ─▶ ChromaDB          │
                     │   (Front-Matter,         (Sentence-       ├ hsd_chunks     │
                     │    Modul-Überschriften)   Transformers)   └ hsd_programs   │
                     └─────────────────────────────────────────────────────────┘
@@ -79,11 +81,9 @@ hsd-study-finder/
 ├── requirements.txt
 ├── .env.example               # LLM-Provider, API-Keys, Embedding-Modell
 ├── .streamlit/config.toml     # Theme für die Messe-Präsentation
-├── data/
-│   ├── README.md              # wie echte Modulhandbücher eingebunden werden
-│   └── programs/*.md          # BEISPIEL-Modulhandbücher (9 Studiengänge)
+├── data/*.pdf                 # offizielle Modulhandbücher (BMI, BMT, BTB, DAISY)
 ├── embeddings/
-│   ├── loader.py              # Markdown/PDF einlesen, Front-Matter, Chunking (LangChain)
+│   ├── loader.py              # PDFs einlesen (PyPDFLoader), Modul-Überschriften erkennen, Chunking
 │   ├── embedder.py            # Sentence-Transformers, L2-normalisiert
 │   ├── vector_store.py        # ChromaDB (Kosinus), Snapshot für torch, RAG-Retrieval
 │   └── build_index.py         # Index bauen: python -m embeddings.build_index
@@ -94,7 +94,7 @@ hsd-study-finder/
 │   ├── akinator.py            # Session-Zustand des Frage-Antwort-Loops
 │   ├── llm.py                 # Provider-Abstraktion (Claude / OpenAI / Ollama / keiner)
 │   └── calibrate.py           # floor/ceil für ein Embedding-Modell bestimmen
-└── tests/test_scoring.py      # Tests der Kernmathematik (u. a. "kein Softmax")
+└── tests/                     # Tests der Kernmathematik (u. a. "kein Softmax"), Fragen, Loader, Kalibrierung
 ```
 
 ## Setup
@@ -113,7 +113,7 @@ pip install -r requirements.txt
 
 cp .env.example .env                 # LLM-Provider/API-Key eintragen (optional)
 python -m embeddings.build_index     # lädt beim ersten Mal das Embedding-Modell (~470 MB)
-python -m core.calibrate             # optional: floor/ceil prüfen
+python -m core.calibrate --write     # floor/ceil bestimmen und in die .env eintragen
 streamlit run app.py
 ```
 
@@ -130,15 +130,36 @@ Standard ist `LLM_PROVIDER=auto`:
 | 3 | Ollama lokal (`llama3.1:8b`) | Ollama läuft unter `OLLAMA_BASE_URL` |
 | 4 | Regelbasierter Fallback | immer – Fragen werden aus dem trennschärfsten Modul gebaut |
 
-Damit läuft die Demo auch ohne Internet. Für die Messe empfiehlt sich: Claude als Hauptweg und
+Damit läuft die Demo auch ohne Internet.
+
+**Welcher Provider aktiv ist**, steht an drei Stellen: in der Seitenleiste der App (🟢 LLM aktiv / 🟠 Fallback,
+dazu unter „Provider-Details“ der Grund je geprüftem Provider), im Terminal (Logger `hsd.*`, Stufe per
+`LOG_LEVEL`, inkl. Antwortzeit je LLM-Aufruf und Warnung bei Fehlern) und unter „🔍 Warum diese Frage?“ je
+Frage. Schlägt ein LLM-Aufruf zur Laufzeit fehl, läuft die Demo regelbasiert weiter und die Frage trägt den
+Vermerk, welcher Provider ausgefallen ist. Schneller Check der Konfiguration samt Testaufruf: `python -m core.llm`. Für die Messe empfiehlt sich: Claude als Hauptweg und
 Ollama als Offline-Backup (`ollama pull llama3.1:8b`). Welches LLM aktiv ist, zeigt die Seitenleiste.
 
 ### Embedding-Modell
 
 Standard: `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 Dimensionen, mehrsprachig,
 läuft flott auf CPU). Bessere Qualität bei mehr Rechenzeit: `paraphrase-multilingual-mpnet-base-v2`.
-Nach einem Modellwechsel den Index neu bauen und `python -m core.calibrate` ausführen, dann
-`COS_FLOOR`/`COS_CEIL` in der `.env` setzen.
+Nach einem Modellwechsel den Index neu bauen und `python -m core.calibrate --write` ausführen
+(trägt `COS_FLOOR`/`COS_CEIL` in die `.env` ein).
+
+### Kalibrierung
+
+`python -m core.calibrate [--probe-style chunk|feature|both] [--write]` simuliert Nutzerprofile gegen den
+Index. `COS_FLOOR` ist der mittlere Kosinus bei fachfremden Antworten, `COS_CEIL` der bei passenden Antworten.
+Ganze Chunks als „Ja“-Antwort liefern deutlich höhere Kosinus-Werte als die kurzen Merkmalssätze, die das LLM
+live erzeugt (hier 0,85 gegenüber 0,76). Deshalb misst der Standard `both` beides und nimmt den **niedrigeren**
+Wert als `COS_CEIL`, sonst würde die Skala im Live-Betrieb nie voll ausgeschöpft.
+
+### Index-Bereinigung
+
+Der Loader verwirft Abschnitte, die nur Layout beschreiben (Tabellenköpfe wie „Verwendung in anderen
+Studiengängen: Modulbeauftragte/r …“, Workload-Tabellen) sowie Literaturangaben. Ohne diesen Filter waren
+die „trennschärfsten“ Abschnitte zwischen Medieninformatik und DAISY keine Inhalte, sondern Unterschiede im
+PDF-Layout.
 
 ## Tipps für die Live-Demo (KI-Con)
 

@@ -1,4 +1,5 @@
-"""COS_FLOOR / COS_CEIL für das aktuelle Embedding-Modell bestimmen: ``python -m core.calibrate [--write]``
+"""COS_FLOOR / COS_CEIL für das aktuelle Embedding-Modell bestimmen:
+``python -m core.calibrate [--probe-style chunk|feature|both] [--write]``
 
 Beides wird mit simulierten Nutzerprofilen gegen den gebauten Index gemessen, mit derselben Formel wie
 im Live-Betrieb (Prior + Antworten, gemischter Kosinus aus Zentroid und Top-k-Chunks):
@@ -6,6 +7,12 @@ im Live-Betrieb (Prior + Antworten, gemischter Kosinus aus Zentroid und Top-k-Ch
 * **ceil** – mittlerer Kosinus zum eigenen Studiengang, wenn eine Person fünfmal „Ja“ zu Abschnitten
   *dieses* Studiengangs sagt. Die Abschnitte stammen aus einer Hälfte der Module, bewertet wird auf der
   anderen Hälfte, damit weder ein Chunk noch seine Nachbarn aus demselben Modul sich selbst finden.
+  Als „Ja“-Probe dienen wahlweise
+    - ``chunk``: der ganze Chunk (lang, viel Kontext → hohe Kosinus-Werte),
+    - ``feature``: nur die ersten ~14 Wörter des Chunks, also so kurz wie die Merkmalssätze, die das LLM
+      im Live-Betrieb liefert (kurze Sätze erreichen kaum so hohe Werte),
+    - ``both`` (Standard): beide; als ``ceil`` zählt der *niedrigere* Wert, damit die Prozentskala im
+      Live-Betrieb nicht an einer unerreichbar hohen Obergrenze hängt.
 * **floor** – mittlerer Kosinus über alle Studiengänge, wenn die Person ausschließlich zu fachfremden
   Themen („Kochen“, „Fußball“ …) „Ja“ sagt.
 
@@ -16,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 import re
+from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
@@ -37,16 +46,42 @@ OFF_TOPIC = [
     "Ich liebe Tiere und möchte Tiermedizin oder Biologie studieren.",
     "Ich begeistere mich für Geschichte, Archäologie und Museen.",
 ]
+PROBE_STYLES = ("chunk", "feature", "both")
 N_PROBES = 5
 N_TRIALS = 40
+SHORT_WORDS = 14
 MIN_SPAN = 0.10
+
+Embed = Callable[[list[str]], np.ndarray]
+
+
+@dataclass
+class Calibration:
+    floor: float
+    ceil: float
+    off_topic: np.ndarray
+    on_topic: dict[str, np.ndarray]   # Probe-Stil → gemessene Kosinus-Werte
+
+
+def short_probe(chunk_text: str, words: int = SHORT_WORDS) -> str:
+    """Kurzfassung eines Chunks: Wörter nach dem Modultitel, ohne Aufzählungs- und Satzzeichen am Anfang."""
+    body = chunk_text.split(" – ", 1)[-1]
+    body = re.sub(r"^[\s.•\-·;:,]+", "", body)
+    return " ".join(body.split()[:words])
 
 
 def _profile(snapshot: IndexSnapshot, probes: np.ndarray) -> np.ndarray:
     return normalize(settings.prior_weight * snapshot.prior + probes.sum(axis=0))
 
 
-def measure_ceil(snapshot: IndexSnapshot, rng: np.random.Generator) -> np.ndarray:
+def measure_ceil(
+    snapshot: IndexSnapshot,
+    rng: np.random.Generator,
+    style: str = "chunk",
+    embed: Embed = embed_texts,
+) -> np.ndarray:
+    if style not in ("chunk", "feature"):
+        raise ValueError(f"unbekannter Probe-Stil: {style}")
     probe_idx, eval_idx = [], []
     for p in range(len(snapshot.program_ids)):
         own = snapshot.chunks_of(p)
@@ -56,16 +91,23 @@ def measure_ceil(snapshot: IndexSnapshot, rng: np.random.Generator) -> np.ndarra
         probe_idx.append(own[in_probe])
         eval_idx.append(own[~in_probe])
     evaluation = snapshot.subset(np.concatenate(eval_idx))
+
+    vectors = snapshot.chunk_embeddings
+    if style == "feature":  # kurze Sätze neu einbetten (einmal je Chunk, nicht je Versuch)
+        all_probe = np.concatenate(probe_idx)
+        vectors = np.zeros_like(snapshot.chunk_embeddings)
+        vectors[all_probe] = embed([short_probe(snapshot.chunk_texts[i]) for i in all_probe])
+
     values = []
     for p, pool in enumerate(probe_idx):
         for _ in range(N_TRIALS):
-            probes = snapshot.chunk_embeddings[rng.choice(pool, size=min(N_PROBES, len(pool)), replace=False)]
+            probes = vectors[rng.choice(pool, size=min(N_PROBES, len(pool)), replace=False)]
             values.append(cosine_scores(_profile(evaluation, probes), evaluation)[p])
     return np.array(values)
 
 
-def measure_floor(snapshot: IndexSnapshot, rng: np.random.Generator) -> np.ndarray:
-    vectors = embed_texts(OFF_TOPIC)
+def measure_floor(snapshot: IndexSnapshot, rng: np.random.Generator, embed: Embed = embed_texts) -> np.ndarray:
+    vectors = embed(OFF_TOPIC)
     values = []
     for _ in range(N_TRIALS):
         probes = vectors[rng.choice(len(vectors), size=N_PROBES, replace=False)]
@@ -73,14 +115,23 @@ def measure_floor(snapshot: IndexSnapshot, rng: np.random.Generator) -> np.ndarr
     return np.concatenate(values)
 
 
-def suggest(snapshot: IndexSnapshot, seed: int = 42) -> tuple[float, float, np.ndarray, np.ndarray]:
+def calibrate(
+    snapshot: IndexSnapshot,
+    style: str = "both",
+    seed: int = 42,
+    embed: Embed = embed_texts,
+) -> Calibration:
+    if style not in PROBE_STYLES:
+        raise ValueError(f"unbekannter Probe-Stil: {style}")
     rng = np.random.default_rng(seed)
-    on_topic = measure_ceil(snapshot, rng)
-    off_topic = measure_floor(snapshot, rng)
-    floor, ceil = float(off_topic.mean()), float(on_topic.mean())
+    styles = ("chunk", "feature") if style == "both" else (style,)
+    on_topic = {s: measure_ceil(snapshot, rng, s, embed) for s in styles}
+    off_topic = measure_floor(snapshot, rng, embed)
+    floor = float(off_topic.mean())
+    ceil = min(float(values.mean()) for values in on_topic.values())
     if ceil - floor < MIN_SPAN:  # degenerierter Index: Skala nicht kollabieren lassen
         ceil = floor + MIN_SPAN
-    return round(floor, 3), round(ceil, 3), off_topic, on_topic
+    return Calibration(round(floor, 3), round(ceil, 3), off_topic, on_topic)
 
 
 def write_env(floor: float, ceil: float) -> None:
@@ -95,8 +146,14 @@ def write_env(floor: float, ceil: float) -> None:
     env.write_text(text, encoding="utf-8")
 
 
+def _stats(values: np.ndarray) -> str:
+    return f"Ø {values.mean():.3f}  (min {values.min():.3f}, max {values.max():.3f})"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--probe-style", choices=PROBE_STYLES, default="both",
+                        help="Länge der simulierten „Ja“-Antworten (Standard: both → niedrigerer ceil)")
     parser.add_argument("--write", action="store_true", help="Werte in die .env eintragen")
     args = parser.parse_args()
 
@@ -104,13 +161,15 @@ def main() -> None:
     if snapshot.is_empty:
         raise SystemExit("Der Vektorindex ist leer. Bitte zuerst `python -m embeddings.build_index` ausführen.")
 
-    floor, ceil, off_topic, on_topic = suggest(snapshot)
+    result = calibrate(snapshot, args.probe_style)
     print(f"Modell: {settings.embedding_model}")
-    print(f"fachfremde Profile : Ø {off_topic.mean():.3f}  (min {off_topic.min():.3f}, max {off_topic.max():.3f})")
-    print(f"passende Profile   : Ø {on_topic.mean():.3f}  (min {on_topic.min():.3f}, max {on_topic.max():.3f})")
-    print(f"\nVorschlag: COS_FLOOR={floor}  COS_CEIL={ceil}")
+    print(f"fachfremde Profile{'':<18}: {_stats(result.off_topic)}")
+    for style, values in result.on_topic.items():
+        label = "ganze Chunks" if style == "chunk" else f"Kurzsätze (~{SHORT_WORDS} Wörter)"
+        print(f"passende Profile, {label:<26}: {_stats(values)}")
+    print(f"\nVorschlag: COS_FLOOR={result.floor}  COS_CEIL={result.ceil}")
     if args.write:
-        write_env(floor, ceil)
+        write_env(result.floor, result.ceil)
         print(f"In {ROOT / '.env'} eingetragen.")
     else:
         print("Mit --write werden die Werte in die .env geschrieben.")
