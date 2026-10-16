@@ -60,6 +60,7 @@ class Settings:
     # Akinator-Loop
     max_questions: int = field(default_factory=lambda: int(_get("MAX_QUESTIONS", "12")))
     min_questions: int = field(default_factory=lambda: int(_get("MIN_QUESTIONS", "5")))
+    duplicate_similarity: float = field(default_factory=lambda: float(_get("DUPLICATE_SIMILARITY", "0.70")))
     candidate_pool: int = field(default_factory=lambda: int(_get("CANDIDATE_POOL", "3")))
     stop_percent: float = field(default_factory=lambda: float(_get("STOP_PERCENT", "75")))
     stop_margin: float = field(default_factory=lambda: float(_get("STOP_MARGIN", "15")))
@@ -73,6 +74,10 @@ class Settings:
     ollama_base_url: str = field(default_factory=lambda: _get("OLLAMA_BASE_URL", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: _get("OLLAMA_MODEL", "llama3.1:8b"))
     llm_timeout: float = 30.0
+    question_max_tokens: int = field(default_factory=lambda: int(_get("QUESTION_MAX_TOKENS", "100")))
+    explain_max_tokens: int = field(default_factory=lambda: int(_get("EXPLAIN_MAX_TOKENS", "300")))
+    ollama_temperature: float = field(default_factory=lambda: float(_get("OLLAMA_TEMPERATURE", "0.3")))
+    ollama_keep_alive: str = field(default_factory=lambda: _get("OLLAMA_KEEP_ALIVE", "30m"))
 
     # Logging (Logger-Familie "hsd.*": LLM-Auswahl, LLM-Aufrufe, Fallbacks)
     log_level: str = field(default_factory=lambda: _get("LOG_LEVEL", "INFO").upper())

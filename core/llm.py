@@ -22,12 +22,13 @@ from config import settings
 log = logging.getLogger("hsd.llm")
 FALLBACK_LABEL = "Regelbasierter Fallback (kein LLM)"
 _PROVIDERS = ("anthropic", "openai", "ollama")
+DEFAULT_MAX_TOKENS = 700
 
 
 class ChatModel(Protocol):
     label: str
 
-    def complete(self, system: str, user: str, json_mode: bool = False) -> str: ...
+    def complete(self, system: str, user: str, json_mode: bool = False, max_tokens: int | None = None) -> str: ...
 
 
 class AnthropicChat:
@@ -37,10 +38,10 @@ class AnthropicChat:
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=settings.llm_timeout)
         self.label = f"Claude ({settings.anthropic_model})"
 
-    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False, max_tokens: int | None = None) -> str:
         message = self._client.messages.create(
             model=settings.anthropic_model,
-            max_tokens=700,
+            max_tokens=max_tokens or DEFAULT_MAX_TOKENS,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
@@ -54,10 +55,11 @@ class OpenAIChat:
         self._client = openai.OpenAI(api_key=settings.openai_api_key, timeout=settings.llm_timeout)
         self.label = f"OpenAI ({settings.openai_model})"
 
-    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False, max_tokens: int | None = None) -> str:
         extra = {"response_format": {"type": "json_object"}} if json_mode else {}
         response = self._client.chat.completions.create(
             model=settings.openai_model,
+            max_completion_tokens=max_tokens or DEFAULT_MAX_TOKENS,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             **extra,
         )
@@ -68,10 +70,15 @@ class OllamaChat:
     def __init__(self) -> None:
         self.label = f"Ollama ({settings.ollama_model}, lokal)"
 
-    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False, max_tokens: int | None = None) -> str:
         payload = {
             "model": settings.ollama_model,
             "stream": False,
+            "keep_alive": settings.ollama_keep_alive,  # Modell zwischen den Fragen nicht entladen
+            "options": {
+                "num_predict": max_tokens or DEFAULT_MAX_TOKENS,  # begrenzt die Generierungszeit
+                "temperature": settings.ollama_temperature,
+            },
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         }
         if json_mode:
@@ -88,16 +95,16 @@ class LoggedChat:
         self._inner = inner
         self.label = inner.label
 
-    def complete(self, system: str, user: str, json_mode: bool = False) -> str:
+    def complete(self, system: str, user: str, json_mode: bool = False, max_tokens: int | None = None) -> str:
         start = time.perf_counter()
         try:
-            reply = self._inner.complete(system, user, json_mode)
+            reply = self._inner.complete(system, user, json_mode, max_tokens)
         except Exception as exc:
             log.warning("%s: Aufruf fehlgeschlagen nach %.1f s (%s: %s)",
                         self.label, time.perf_counter() - start, type(exc).__name__, exc)
             raise
         log.info("%s: Antwort in %.1f s (%d Zeichen)", self.label, time.perf_counter() - start, len(reply))
-        log.debug("Prompt-Länge system=%d user=%d", len(system), len(user))
+        log.debug("Prompt-Länge system=%d user=%d Zeichen, max_tokens=%s", len(system), len(user), max_tokens)
         return reply
 
 
@@ -166,7 +173,11 @@ def main() -> None:
         print("Hinweis: Ohne LLM nutzt der Study-Finder regelbasierte Fragen. Key in .env eintragen oder Ollama starten.")
         return
     print("Testaufruf …")
-    print("Antwort:", model.complete("Antworte mit genau einem Wort.", "Sag OK.").strip()[:80])
+    try:
+        print("Antwort:", model.complete("Antworte mit genau einem Wort.", "Sag OK.").strip()[:80])
+    except Exception as exc:
+        raise SystemExit(f"Testaufruf fehlgeschlagen ({type(exc).__name__}). Details stehen in der Warnung oben; "
+                         "die App läuft in diesem Fall regelbasiert weiter.")
 
 
 if __name__ == "__main__":

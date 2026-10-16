@@ -146,6 +146,27 @@ läuft flott auf CPU). Bessere Qualität bei mehr Rechenzeit: `paraphrase-multil
 Nach einem Modellwechsel den Index neu bauen und `python -m core.calibrate --write` ausführen
 (trägt `COS_FLOOR`/`COS_CEIL` in die `.env` ein).
 
+### Fragen-Ablauf und Ollama
+
+Jede Frage wird vor der Ausgabe gegen die bisherigen geprüft: Kosinus der Merkmal-Embeddings und Wort-Jaccard
+der Inhaltswörter, Schwelle `DUPLICATE_SIMILARITY=0.70`. Ein Duplikat wird verworfen, das LLM bekommt einen
+zweiten Versuch mit dem nächstbesten Chunk, danach baut die Regel eine Frage aus dem nächsten unverbrauchten
+Chunk. Module früherer Fragen werden gar nicht erst vorgeschlagen.
+
+Für lokale Modelle ist der Prompt kurz gehalten und die Antwort auf `QUESTION_MAX_TOKENS=100` begrenzt
+(JSON aus `question`, `detail`, `feature`; die Begründung der Frage baut die Regel). Ollama läuft mit
+`OLLAMA_TEMPERATURE=0.3` und `OLLAMA_KEEP_ALIVE=30m`, damit das Modell zwischen den Fragen geladen bleibt.
+Die Abschluss-Begründung darf länger sein (`EXPLAIN_MAX_TOKENS=300`).
+
+### Ergebnisseite
+
+Am Ende zeigt die App die **Rangliste aller Studiengänge** mit je einem eigenen Prozentwert und Balken
+(Summe ≠ 100 %, kein Softmax). Liegt der Kosinus unter `COS_FLOOR`, steht statt eines harten „0 %“ der Wert
+„< 1 %“ mit einem Mindestbalken und dem Hinweis „Geringe Übereinstimmung“ samt Kosinus-Wert. Für die **Top 3**
+gibt es aufklappbare Begründungen: Fließtext (ein LLM-Aufruf für alle drei, sonst regelbasiert), die Antworten,
+die den Studiengang gegenüber den anderen hoben („Dafür sprach“) oder senkten („Dagegen sprach“), und die dem
+Profil nächsten Module aus dem Modulhandbuch. Die Belege kommen immer aus dem Index, nie vom LLM.
+
 ### Kalibrierung
 
 `python -m core.calibrate [--probe-style chunk|feature|both] [--write]` simuliert Nutzerprofile gegen den

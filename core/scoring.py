@@ -24,6 +24,7 @@ class ProgramScore:
     name: str
     cosine: float
     percent: float
+    below_floor: bool = False   # Kosinus unter COS_FLOOR: Prozentwert ist auf 0 gekappt
 
 
 @dataclass
@@ -84,7 +85,7 @@ def score_programs(
     cosines = cosine_scores(u, snapshot, alpha, top_k)
     percents = cosine_to_percent(cosines, floor, ceil)
     scores = [
-        ProgramScore(pid, name, float(c), float(pct))
+        ProgramScore(pid, name, float(c), float(pct), bool(c < floor))
         for pid, name, c, pct in zip(snapshot.program_ids, snapshot.program_names, cosines, percents)
     ]
     return sorted(scores, key=lambda s: s.cosine, reverse=True)

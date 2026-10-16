@@ -184,14 +184,14 @@ def test_rule_based_question_without_llm(snapshot):
 class _BrokenChat:
     label = "kaputt"
 
-    def complete(self, system, user, json_mode=False):
+    def complete(self, system, user, json_mode=False, max_tokens=None):
         raise RuntimeError("Rate-Limit")
 
 
 class _JsonChat:
     label = "Test-LLM"
 
-    def complete(self, system, user, json_mode=False):
+    def complete(self, system, user, json_mode=False, max_tokens=None):
         return 'Gern!\n{"question": "Magst du <b>Mathe</b>?", "detail": "Z. B. Statistik.", "feature": "Mathematik und Statistik", "rationale": "trennt A von C"}'
 
 

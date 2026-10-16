@@ -71,14 +71,14 @@ def test_explicit_provider_without_key_falls_back(provider):
 class _Echo:
     label = "Echo"
 
-    def complete(self, system, user, json_mode=False):
+    def complete(self, system, user, json_mode=False, max_tokens=None):
         return "OK"
 
 
 class _Boom:
     label = "Boom"
 
-    def complete(self, system, user, json_mode=False):
+    def complete(self, system, user, json_mode=False, max_tokens=None):
         raise TimeoutError("zu langsam")
 
 
@@ -122,6 +122,9 @@ def test_prompt_includes_hint_only_for_app_development_content():
         assert (APP_DEV_HINT in prompt) is expected
 
 
-def test_system_prompt_demands_concrete_features():
-    assert "8 bis 20 Wörter" in SYSTEM_PROMPT and "Gute Merkmale" in SYSTEM_PROMPT
-    assert "Hinweis Anwendungsentwicklung" in APP_DEV_HINT and "Medien & Interaktion" in APP_DEV_HINT
+def test_system_prompt_is_compact_but_keeps_the_essentials():
+    assert len(SYSTEM_PROMPT) < 700                       # kurz, damit Ollama wenig Kontext verarbeiten muss
+    for essential in ("Ja/Nein", "JSON", "feature", "Modulabschnitte", "8 bis 15 Wörter"):
+        assert essential in SYSTEM_PROMPT
+    assert "Anwendungsentwicklung" in APP_DEV_HINT and "Medien & Interaktion" in APP_DEV_HINT
+    assert "Daten & Intelligenz" in APP_DEV_HINT and len(APP_DEV_HINT) < 600

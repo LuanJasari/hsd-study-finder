@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from config import settings
 from core import llm
-from core.question_generator import Question, build_explanation, generate_question
+from core.explain import ProgramExplanation, build_explanations
+from core.question_generator import Question, generate_question
 from core.scoring import ProgramScore, UserProfile, score_programs
 from embeddings.embedder import embed_text
 from embeddings.vector_store import IndexSnapshot
+
+log = logging.getLogger("hsd.akinator")
 
 EXTRA_QUESTIONS = 3  # so viele Fragen kommen nach „Weiter fragen“ mindestens dazu
 
@@ -29,14 +34,16 @@ class AkinatorSession:
     scores: list[ProgramScore]
     question: Question | None = None
     turns: list[Turn] = field(default_factory=list)
+    _u: np.ndarray | None = field(default=None, repr=False)  # aktueller Profilvektor, einmal je Antwort berechnet
     _probe: np.ndarray | None = field(default=None, repr=False)
     _asked_probes: list[np.ndarray] = field(default_factory=list, repr=False)
     _ask_until: int = field(default=0, repr=False)
 
     @classmethod
     def create(cls, snapshot: IndexSnapshot) -> "AkinatorSession":
-        profile = UserProfile(prior=snapshot.prior)
-        return cls(snapshot, profile, score_programs(profile.vector(), snapshot))
+        session = cls(snapshot, UserProfile(prior=snapshot.prior), scores=[])
+        session._rescore()
+        return session
 
     # -------------------------------------------------------------- Ablauf
     def start(self, intro: str = "") -> None:
@@ -58,14 +65,16 @@ class AkinatorSession:
         self._ask_until = len(self.turns) + EXTRA_QUESTIONS
         self._next_question()
 
-    def explanation(self) -> str:
+    def explanations(self) -> list[ProgramExplanation]:
+        """Begründungen für die Top-3 der Rangliste."""
         _, chat = llm.get_chat_model()
-        answers = [(t.question.text, t.answer) for t in self.turns]
-        return build_explanation(self.snapshot, self.profile.vector(), self.scores, answers, chat)
+        answers = [(t.question.text, t.answer, settings.answer_weights[t.answer]) for t in self.turns]
+        return build_explanations(self.snapshot, self._u, self.scores, answers, self._asked_probes, chat)
 
     # ------------------------------------------------------------- intern
     def _rescore(self) -> None:
-        self.scores = score_programs(self.profile.vector(), self.snapshot)
+        self._u = self.profile.vector()
+        self.scores = score_programs(self._u, self.snapshot)
 
     def _should_stop(self) -> bool:
         n = len(self.turns)
@@ -83,8 +92,11 @@ class AkinatorSession:
             self.question, self._probe = None, None
             return
         _, chat = llm.get_chat_model()
+        start = time.perf_counter()
         self.question = generate_question(
-            self.snapshot, self.profile.vector(), self.scores,
-            [t.question for t in self.turns], self._asked_probes, chat,
+            self.snapshot, self._u, self.scores,
+            [t.question for t in self.turns], self._asked_probes, chat, embed=embed_text,
         )
-        self._probe = embed_text(self.question.probe_text)
+        # Das Embedding stammt aus der Duplikat-Prüfung und wird nicht ein zweites Mal berechnet
+        self._probe = self.question.probe_vec if self.question.probe_vec is not None else embed_text(self.question.probe_text)
+        log.debug("Frage %d in %.0f ms erzeugt", len(self.turns) + 1, (time.perf_counter() - start) * 1000)
